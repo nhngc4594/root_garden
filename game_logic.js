@@ -47,7 +47,12 @@ export function loadProgress() {
         if (gameState.isInReviewMode) {
              currentLevel = loadReviewLevel(true); // Loads the next review level without advancing the index
         } else {
-             currentLevel = currentZone.levels[gameState.currentLevelIndex] || currentZone.levels[0];
+             // Ensure index is valid for the current zone
+             const zoneLevels = currentZone.levels;
+             if (gameState.currentLevelIndex >= zoneLevels.length) {
+                 gameState.currentLevelIndex = zoneLevels.length - 1; // Cap at last level if corrupted
+             }
+             currentLevel = zoneLevels[gameState.currentLevelIndex] || zoneLevels[0];
         }
 
         console.log('Game state loaded:', gameState);
@@ -162,7 +167,6 @@ export function handlePOSFailure(levelId) {
 }
 
 // --- Shop and Inventory Logic ---
-// ... (buyItem function remains the same) ...
 
 /**
  * Attempts to purchase an item, updating currency and inventory if successful.
@@ -266,6 +270,38 @@ function loadReviewLevel(peek = false) {
 }
 
 /**
+ * Attempts to unlock and move to the next sequential zone.
+ * @returns {boolean} True if the zone transition was successful.
+ */
+function tryAdvanceZone() {
+    const currentZoneIndex = ZONES.findIndex(z => z.id === gameState.currentZoneId);
+    const nextZoneIndex = currentZoneIndex + 1;
+
+    if (nextZoneIndex < ZONES.length) {
+        const nextZone = ZONES[nextZoneIndex];
+        
+        if (nextZone.levels.length === 0) {
+            console.log(`Zone ${nextZone.title} is empty (Phase 4 content pending). Game halted.`);
+            return false; // Stop progression if zone is empty
+        }
+
+        // UNLOCK AND TRANSITION
+        gameState.currentZoneId = nextZone.id;
+        gameState.currentLevelIndex = 0;
+        currentZone = nextZone;
+        currentLevel = currentZone.levels[0];
+        // Note: The UI layer will need to visually unlock the map segment
+        console.log(`Transitioning to new Zone: ${currentZone.title}`);
+        return true;
+    } else {
+        console.log("All current zones mastered! You are a Grand Guardian!");
+        // The game should offer a final reward or loop back to the first zone here.
+        return false; 
+    }
+}
+
+
+/**
  * Advances the game to the next level, handling Zone completion and Review Mode transition.
  * @param {boolean} wasPerfect - True if the last word was answered perfectly (Root & POS).
  */
@@ -289,6 +325,7 @@ export function advanceLevel(wasPerfect) {
     }
 
     // 2. Trigger the Bear Event (only if we are NOT in review mode and the snake is NOT active)
+    // Note: The bear can be triggered after a perfect review or a normal word.
     maybeTriggerBear(wasPerfect);
     
     // 3. Normal Progression Logic
@@ -302,12 +339,17 @@ export function advanceLevel(wasPerfect) {
         console.log(`Advanced to level ${nextIndex + 1} of ${currentZone.title}.`);
     } else {
         // Zone Complete! Try to move to the next zone.
-        console.log(`Zone ${currentZone.title} completed!`);
-        // We'll implement Zone unlocking and map movement in Phase 4
+        console.log(`Zone ${currentZone.title} completed! Attempting map transition...`);
+        if (!tryAdvanceZone()) {
+            // If advancing fails (e.g., last zone is complete), reset to start of the current zone for replayability
+            gameState.currentLevelIndex = 0;
+            currentLevel = currentZoneLevels[0];
+            console.log("Zone completed, resetting to beginning of zone for replay.");
+        }
     }
     
-    // Reload the current level (may be the start of a new zone later)
-    currentLevel = currentZoneLevels[gameState.currentLevelIndex]; 
+    // Ensure the currentLevel reference is correct after any index change
+    currentLevel = currentZone.levels[gameState.currentLevelIndex]; 
 }
 
 /**
@@ -360,6 +402,9 @@ export const getGameState = () => gameState;
 
 // Export the current level details
 export const getCurrentLevel = () => currentLevel;
+
+// Export ZONES array for map UI rendering
+export const getZones = () => ZONES;
 
 
 // --- Initialization Example ---
