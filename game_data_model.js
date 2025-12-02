@@ -1,117 +1,366 @@
-// game_data_model.js
-//
-// This file defines the core data structures and the initial game state
-// for the Grammar Garden Guardians application.
+import { INITIAL_GAME_STATE, ZONES, loadGameState } from './game_data_model.js';
+import { SHOP_ITEMS } from './shop_items.js'; // Import shop items
 
-// --- 1. CORE DATA STRUCTURES ---
+// --- Global Game State and Persistence ---
+let gameState = INITIAL_GAME_STATE;
+let currentZone = ZONES[0];
+// Need to reference all levels for review mode lookup
+const allLevels = ZONES.flatMap(zone => zone.levels);
+let currentLevel = currentZone.levels[0];
 
-/**
- * Defines the structure for a single word level in the game.
- * @typedef {object} Level
- * @property {number} id - The unique ID of the level (used for tracking mistakes).
- * @property {string} fullWord - The derivative word presented to the player (the 'Pest').
- * @property {string} root - The core root word (the 'Root Plant').
- * @property {string[]} decoys - Incorrect root choices for the multiple-choice question.
- * @property {string} pos - The correct Part of Speech (POS) of the root ('Fertilizer').
- * @property {string[]} posDecoys - Incorrect POS choices.
- */
+// Keys for localStorage
+const GAME_STATE_KEY = 'grammarGardenState';
 
-/**
- * Defines a Zone on the map, grouping a set of levels.
- * @typedef {object} Zone
- * @property {string} id - Unique identifier for the zone (matches GameState currentZoneId).
- * @property {string} title - The name displayed on the map (e.g., 'Quaint English Garden').
- * @property {Level[]} levels - The array of words/levels in this zone.
- * @property {boolean} isLocked - Flag to prevent access until mastery criteria are met.
- */
+// Extend GameState with Review Mode flag
+if (typeof gameState.isInReviewMode === 'undefined') {
+    gameState.isInReviewMode = false;
+}
 
 /**
- * Defines the comprehensive, persistent state of the player and the garden.
- * Corresponds to the GameState model in the roadmap.
- * @typedef {object} GameState
- * @property {string} currentZoneId - The ID of the zone the player is currently in.
- * @property {number} currentLevelIndex - The index of the current word in the zone's levels array.
- * @property {number} playerHarvest - Soft currency for basic supplies.
- * @property {number} playerGems - Hard currency for permanent items/pets/defenses.
- * @property {number[]} imperfectWords - IDs of levels where the player made a mistake.
- * @property {object} inventory - Tracks cosmetic and active items.
- * @property {number} gardenHealth - Progress bar health (100 is max).
- * @property {boolean} isBearActive - Flag for the Grizzly Bear threat.
- * @property {number} roundsUntilBearLeaves - Counter for the currency penalty duration.
+ * Saves the current gameState to localStorage.
  */
+export function saveProgress() {
+    try {
+        localStorage.setItem(GAME_STATE_KEY, JSON.stringify(gameState));
+        console.log('Game state saved.');
+    } catch (e) {
+        console.error('Error saving game state to localStorage:', e);
+    }
+}
+
+/**
+ * Loads the game state from localStorage, or uses the initial state if none is found.
+ */
+export function loadProgress() {
+    try {
+        const savedState = JSON.parse(localStorage.getItem(GAME_STATE_KEY));
+        gameState = loadGameState(savedState);
+        // Ensure new properties are initialized if not present in old save data
+        if (typeof gameState.isInReviewMode === 'undefined') {
+            gameState.isInReviewMode = false;
+        }
+
+        // Sync current zone and level based on loaded state
+        currentZone = ZONES.find(z => z.id === gameState.currentZoneId) || ZONES[0];
+        
+        // Determine the next level to load based on mode
+        if (gameState.isInReviewMode) {
+             currentLevel = loadReviewLevel(true); // Loads the next review level without advancing the index
+        } else {
+             currentLevel = currentZone.levels[gameState.currentLevelIndex] || currentZone.levels[0];
+        }
+
+        console.log('Game state loaded:', gameState);
+    } catch (e) {
+        console.error('Error loading game state from localStorage, initializing new game.', e);
+        gameState = INITIAL_GAME_STATE;
+        saveProgress(); // Save the fresh state
+    }
+}
+
+/**
+ * Applies the currency rewards based on the action, factoring in the Bear threat.
+ * @param {('root'|'pos'|'perfect')} rewardType - The type of reward earned.
+ */
+function applyReward(rewardType) {
+    let harvestReward = 0;
+    let gemReward = 0;
+    let harvestMultiplier = 1;
+
+    // Check for consumable boosts (e.g., Fertilizer)
+    // Note: We are using 'fertilizerCount' from inventory.
+    if (rewardType === 'pos' && gameState.inventory.fertilizerCount > 0) {
+        harvestMultiplier = 2;
+        // The boost is consumed on use
+        gameState.inventory.fertilizerCount--;
+        console.log("Nutrient Fertilizer consumed! Harvest multiplier applied (x2).");
+    }
+
+    switch (rewardType) {
+        case 'root':
+            harvestReward = 1; // +1 Root Harvest for zapping the Pest
+            break;
+        case 'pos':
+            harvestReward = 2; // +2 Root Harvest for applying the Tonic
+            break;
+        case 'perfect':
+            gemReward = 1; // +1 Gem for a perfect word
+            break;
+    }
+
+    // Apply Multiplier
+    harvestReward = harvestReward * harvestMultiplier;
+
+    // Apply Bear Penalty (50% reduction in Root Harvest)
+    if (gameState.isBearActive) {
+        harvestReward = Math.floor(harvestReward * 0.5);
+    }
+    
+    gameState.playerHarvest += harvestReward;
+    gameState.playerGems += gemReward;
+
+    console.log(`Reward applied: +${harvestReward} Harvest, +${gemReward} Gems. Current Harvest: ${gameState.playerHarvest}`);
+
+    // If a penalty was applied, decrement the bear timer
+    if (gameState.isBearActive && (harvestReward > 0 || gemReward > 0)) {
+        gameState.roundsUntilBearLeaves--;
+        if (gameState.roundsUntilBearLeaves <= 0) {
+            gameState.isBearActive = false;
+            console.log("The Grizzly Bear has left! Your garden is safe.");
+        }
+    }
+}
+
+// --- Game Action Handlers (Success/Failure) ---
+
+/**
+ * Handles a successful Root Retrieval (Phase 1).
+ */
+export function handleRootSuccess() {
+    applyReward('root');
+}
+
+/**
+ * Handles a failed Root Retrieval (Phase 1).
+ * @param {number} levelId - The ID of the current level for tracking mistakes.
+ */
+export function handleRootFailure(levelId) {
+    // 1. Mistake Tracking
+    if (!gameState.imperfectWords.includes(levelId)) {
+        gameState.imperfectWords.push(levelId);
+    }
+    // 2. Health Penalty
+    gameState.gardenHealth = Math.max(0, gameState.gardenHealth - 5); 
+    console.warn(`Root ID failed. Imperfect word added (ID ${levelId}). Health: ${gameState.gardenHealth}`);
+}
+
+/**
+ * Handles a successful POS Fertilizer application (Phase 2).
+ * @param {boolean} isPerfect - True if both Root and POS were correct on the first try.
+ */
+export function handlePOSSuccess(isPerfect) {
+    applyReward('pos');
+    if (isPerfect) {
+        applyReward('perfect');
+    }
+    // Health logic: Plant pulses with light (tiny health boost for maintenance)
+    gameState.gardenHealth = Math.min(100, gameState.gardenHealth + 1);
+}
+
+/**
+ * Handles a failed POS Fertilizer application (Phase 2).
+ * @param {number} levelId - The ID of the current level for tracking mistakes.
+ */
+export function handlePOSFailure(levelId) {
+    // 1. Mistake Tracking
+    if (!gameState.imperfectWords.includes(levelId)) {
+        gameState.imperfectWords.push(levelId);
+    }
+    // 2. Health Penalty
+    gameState.gardenHealth = Math.max(0, gameState.gardenHealth - 10);
+    console.warn(`POS ID failed. Imperfect word added (ID ${levelId}). Health: ${gameState.gardenHealth}`);
+}
+
+// --- Shop and Inventory Logic ---
+// ... (buyItem function remains the same) ...
+
+/**
+ * Attempts to purchase an item, updating currency and inventory if successful.
+ * @param {string} itemId - The ID of the item to purchase (must match item in SHOP_ITEMS).
+ * @returns {object} { success: boolean, message: string }
+ */
+export function buyItem(itemId) {
+    const item = SHOP_ITEMS.find(i => i.id === itemId);
+
+    if (!item) {
+        return { success: false, message: 'Error: Item not found.' };
+    }
+
+    // 1. Check if item is already owned (for permanent items)
+    if (item.type === 'cosmetic' && gameState.inventory[item.id]) {
+        return { success: false, message: 'You already own this item.' };
+    }
+    
+    // Check defense item status
+    if (item.id === 'rattlerSnake' && gameState.inventory.snakeActive) {
+        return { success: false, message: 'The Rattler is already guarding your garden!' };
+    }
+
+    // 2. Check sufficient funds
+    if (item.currencyType === 'harvest' && gameState.playerHarvest < item.cost) {
+        return { success: false, message: `Not enough Root Harvest! Need ${item.cost}.` };
+    }
+    if (item.currencyType === 'gem' && gameState.playerGems < item.cost) {
+        return { success: false, message: `Not enough Guardian Gems! Need ${item.cost}.` };
+    }
+
+    // --- Purchase Successful ---
+
+    // 3. Deduct currency
+    if (item.currencyType === 'harvest') {
+        gameState.playerHarvest -= item.cost;
+    } else {
+        gameState.playerGems -= item.cost;
+    }
+
+    // 4. Apply effect and update inventory
+    let inventoryKey;
+    switch (item.type) {
+        case 'cosmetic':
+            // Cosmetic items are tracked by their type (hat, apron, hoe)
+            // The item ID is saved under the category key
+            inventoryKey = item.id.replace(/(Hat|Apron|Hoe)$/, '').toLowerCase() + item.type.replace('c', 'C');
+            gameState.inventory[inventoryKey] = item.id;
+            break;
+        case 'consumable':
+            // Fertilizer is tracked by count
+            gameState.inventory.fertilizerCount++;
+            break;
+        case 'defense':
+            // Snake activates immediately upon purchase
+            if (item.id === 'rattlerSnake') {
+                gameState.inventory.snakeActive = true;
+                // If the bear is active, purchasing the snake scares it away immediately
+                if (gameState.isBearActive) {
+                    gameState.isBearActive = false;
+                    gameState.roundsUntilBearLeaves = 0;
+                    console.log("Rattler purchased! The Grizzly Bear has been scared off!");
+                }
+            }
+            break;
+    }
+
+    saveProgress(); // Save the state immediately after purchase
+    return { success: true, message: `${item.name} purchased! Garden upgraded.` };
+}
 
 
-// --- 2. GAME CONTENT (LEVELS & ZONES) ---
+// --- Level and Progression Management ---
 
-// Define the initial list of levels. The structure ensures we have all necessary components
-// for both the Root Retrieval and POS Fertilizer steps.
+/**
+ * Determines the next level to load when in Review Mode.
+ * @param {boolean} peek - If true, just return the level without modifying state.
+ * @returns {Level | null} The next level to review, or null if review list is empty.
+ */
+function loadReviewLevel(peek = false) {
+    if (gameState.imperfectWords.length === 0) {
+        if (!peek) {
+            gameState.isInReviewMode = false;
+            console.log("Review complete! Returning to main progression.");
+        }
+        return null;
+    }
 
-/** @type {Level[]} */
-const allLevels = [
-    // Zone 1: English Garden (Beginner) - Focus on simple, common roots
-    { id: 1, fullWord: 'Visible', root: 'Vis', decoys: ['Abl', 'Tion'], pos: 'Adjective', posDecoys: ['Noun', 'Verb'] },
-    { id: 2, fullWord: 'Audience', root: 'Aud', decoys: ['Ence', 'Audi'], pos: 'Noun', posDecoys: ['Adjective', 'Verb'] },
-    { id: 3, fullWord: 'Credible', root: 'Cred', decoys: ['Able', 'Cree'], pos: 'Adjective', posDecoys: ['Noun', 'Verb'] },
-    { id: 4, fullWord: 'Project', root: 'Ject', decoys: ['Pro', 'Ect'], pos: 'Verb', posDecoys: ['Noun', 'Adjective'] },
-    { id: 5, fullWord: 'Territory', root: 'Terr', decoys: ['Tory', 'Ito'], pos: 'Noun', posDecoys: ['Adjective', 'Verb'] },
-    { id: 6, fullWord: 'Inscribe', root: 'Scrib', decoys: ['In', 'Cribe'], pos: 'Verb', posDecoys: ['Noun', 'Adjective'] },
+    // Always review the word that has been in the list the longest (FIFO)
+    const nextLevelId = gameState.imperfectWords[0];
+    const reviewLevel = allLevels.find(level => level.id === nextLevelId);
 
-    // Zone 2: Mossy Glade (Advanced) - Longer words, focus on tougher POS
-    { id: 7, fullWord: 'Demography', root: 'Dem', decoys: ['Graph', 'Yphy'], pos: 'Noun', posDecoys: ['Adjective', 'Verb'] },
-    { id: 8, fullWord: 'Biography', root: 'Bio', decoys: ['Graphy', 'Bioh'], pos: 'Noun', posDecoys: ['Adjective', 'Verb'] },
-    { id: 9, fullWord: 'Symmetric', root: 'Metr', decoys: ['Sym', 'Tric'], pos: 'Adjective', posDecoys: ['Noun', 'Verb'] },
-    { id: 10, fullWord: 'Telepathy', root: 'Path', decoys: ['Tele', 'Ethy'], pos: 'Noun', posDecoys: ['Adjective', 'Verb'] },
-    { id: 11, fullWord: 'Hydration', root: 'Hydr', decoys: ['Tion', 'Drat'], pos: 'Noun', posDecoys: ['Adjective', 'Verb'] },
-    { id: 12, fullWord: 'Microscope', root: 'Scop', decoys: ['Micro', 'Rope'], pos: 'Noun', posDecoys: ['Adjective', 'Verb'] },
-];
+    if (!reviewLevel) {
+        // Should not happen, but clean up bad ID just in case
+        if (!peek) gameState.imperfectWords.shift();
+        return loadReviewLevel(peek);
+    }
+    
+    currentLevel = reviewLevel;
+    return currentLevel;
+}
 
-/** @type {Zone[]} */
-export const ZONES = [
-    {
-        id: 'EnglishGarden',
-        title: 'Quaint English Country Garden',
-        levels: allLevels.slice(0, 6), // Levels 1-6
-        isLocked: false,
-    },
-    {
-        id: 'MossyGlade',
-        title: 'The Enchanted Mossy Glade',
-        levels: allLevels.slice(6, 12), // Levels 7-12
-        isLocked: true, // Will be unlocked after English Garden mastery
-    },
-    {
-        id: 'GrecoRoman',
-        title: 'The Greco-Roman Temple Garden',
-        levels: [], // Future Greek/Latin root words (Phase 4 content)
-        isLocked: true,
-    },
-];
+/**
+ * Advances the game to the next level, handling Zone completion and Review Mode transition.
+ * @param {boolean} wasPerfect - True if the last word was answered perfectly (Root & POS).
+ */
+export function advanceLevel(wasPerfect) {
+    saveProgress(); // Save before advancing
+
+    // 1. Handle Review Mode Completion/Advancement
+    if (gameState.isInReviewMode) {
+        if (wasPerfect) {
+            // If perfect in review, remove it from the list
+            gameState.imperfectWords.shift();
+            console.log(`Review word mastered (ID ${currentLevel.id}) and removed from list.`);
+        }
+        
+        // Load the next review word, or exit review mode
+        if (loadReviewLevel() !== null) {
+            // Still in review mode, next level loaded
+            return;
+        } 
+        // If loadReviewLevel returned null, it means Review Mode is now false.
+    }
+
+    // 2. Trigger the Bear Event (only if we are NOT in review mode and the snake is NOT active)
+    maybeTriggerBear(wasPerfect);
+    
+    // 3. Normal Progression Logic
+    const currentZoneLevels = currentZone.levels;
+    const nextIndex = gameState.currentLevelIndex + 1;
+
+    if (nextIndex < currentZoneLevels.length) {
+        // Move to the next word in the current zone
+        gameState.currentLevelIndex = nextIndex;
+        currentLevel = currentZoneLevels[nextIndex];
+        console.log(`Advanced to level ${nextIndex + 1} of ${currentZone.title}.`);
+    } else {
+        // Zone Complete! Try to move to the next zone.
+        console.log(`Zone ${currentZone.title} completed!`);
+        // We'll implement Zone unlocking and map movement in Phase 4
+    }
+    
+    // Reload the current level (may be the start of a new zone later)
+    currentLevel = currentZoneLevels[gameState.currentLevelIndex]; 
+}
+
+/**
+ * Randomly checks if the Grizzly Bear should be triggered, and initiates Review Mode if so.
+ * This should be called after a player completes a word or section.
+ * @param {boolean} wasPerfect - True if the last word was answered perfectly.
+ */
+function maybeTriggerBear(wasPerfect) {
+    if (gameState.inventory.snakeActive || gameState.isBearActive) {
+        return; // Defense active or bear is already here
+    }
+
+    // Calculate a failure chance based on mistakes made so far
+    // High mistakes = high chance. Low mistakes (perfect round) = low chance.
+    const baseChance = 0.05; // 5% base chance per word
+    
+    // Additive chance for poor performance
+    let mistakeMultiplier = gameState.imperfectWords.length / allLevels.length;
+    
+    // If the last word was imperfect, increase the immediate chance
+    if (!wasPerfect) {
+        mistakeMultiplier += 0.1; // 10% bonus chance if the last word failed
+    }
+
+    const triggerChance = baseChance + mistakeMultiplier;
+
+    if (Math.random() < triggerChance) {
+        console.log(`Bear Trigger Chance was ${Math.round(triggerChance * 100)}%... Successful!`);
+        
+        // 1. Activate Bear Penalty
+        gameState.isBearActive = true;
+        gameState.roundsUntilBearLeaves = 3; // Bear stays for 3 rounds
+
+        // 2. Initiate Review Mode (Reinforcement Learning)
+        if (gameState.imperfectWords.length > 0) {
+            gameState.isInReviewMode = true;
+            loadReviewLevel(); // Load the first word to review
+            console.warn("!! GRIZZLY BEAR ATTACK !! Review Mode Initiated to repair the garden!");
+        } else {
+            // Player was perfect! The Bear is just randomly annoying.
+            // In this case, it just causes the currency penalty without forced review.
+            console.warn("!! GRIZZLY BEAR ATTACK !! You were perfect, but the Bear is demanding a toll!");
+        }
+    }
+}
 
 
-// --- 3. INITIAL GAME STATE ---
+// Export the game state getter for UI/other modules to read
+export const getGameState = () => gameState;
 
-/** @type {GameState} */
-export const INITIAL_GAME_STATE = {
-    currentZoneId: ZONES[0].id,
-    currentLevelIndex: 0,
-    playerHarvest: 0, // Root Harvest currency
-    playerGems: 0,
-    imperfectWords: [], // List of level IDs where mistakes occurred
-    inventory: {
-        hat: null, // e.g., 'straw'
-        apron: null, // e.g., 'green'
-        hoe: null, // e.g., 'silver'
-        snakeActive: false,
-        fertilizerCount: 0,
-    },
-    gardenHealth: 100, // Starts full
-    isBearActive: false,
-    roundsUntilBearLeaves: 0,
-};
+// Export the current level details
+export const getCurrentLevel = () => currentLevel;
 
-// Function to safely load state, merging with initial state to ensure new properties are added.
-export const loadGameState = (savedState) => {
-    return savedState
-        ? { ...INITIAL_GAME_STATE, ...savedState }
-        : INITIAL_GAME_STATE;
-};
+
+// --- Initialization Example ---
+loadProgress(); // Load the game state on startup
